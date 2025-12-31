@@ -14,9 +14,8 @@
 # limitations under the License.
 """
 
-from functools import partial
+from typing import Optional
 
-import numpy as np
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
@@ -30,7 +29,8 @@ from paddle.nn.functional.flash_attention import (
 )
 from paddleformers.transformers.model_utils import PretrainedModel
 
-from fastdeploy.model_executor.layers.utils import get_tensor
+from fastdeploy.model_executor.layers.utils import divide, get_tensor
+from fastdeploy.model_executor.utils import fd_cast, set_weight_attrs
 
 from .activation import ACT2FN
 from .configuration import DFNRopeVisionTransformerConfig
@@ -74,12 +74,20 @@ class VisionFlashAttention2(nn.Layer):
         nn (_type_): _description_
     """
 
-    def __init__(self, dim: int, num_heads: int = 16, tensor_parallel_degree: int = 1) -> None:
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 16,
+        tensor_model_parallel_size: int = 1,
+        tensor_parallel_rank: int = 0,
+        model_format: str = "",
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.tensor_parallel_degree = tensor_parallel_degree
+        self.tensor_model_parallel_size = tensor_model_parallel_size
+        self.tensor_parallel_rank = tensor_parallel_rank
 
-        if tensor_parallel_degree > 1:
+        if tensor_model_parallel_size > 1:
             self.qkv = ColumnParallelLinear(
                 dim,
                 dim * 3,
@@ -96,16 +104,63 @@ class VisionFlashAttention2(nn.Layer):
                 input_is_parallel=True,
                 has_bias=True,
             )
+
+            # TODO(wangyafeng) Referring to the current situation of combining ernie vl
+            # with the framework, it should be possible to optimize it in the future
+            set_weight_attrs(self.qkv.weight, {"weight_loader": self.weight_loader})
+            set_weight_attrs(
+                self.qkv.bias, {"weight_loader": self.weight_loader, "load_bias": True, "output_dim": True}
+            )
+            set_weight_attrs(self.proj.weight, {"output_dim": False})
+
         else:
             self.qkv = nn.Linear(dim, dim * 3, bias_attr=True)
             self.proj = nn.Linear(dim, dim, bias_attr=True)
 
+        set_weight_attrs(self.qkv.weight, {"weight_need_transpose": model_format == "torch"})
+        set_weight_attrs(self.proj.weight, {"weight_need_transpose": model_format == "torch"})
         self.head_dim = dim // num_heads  # must added
+        self.num_heads = num_heads
+        self.hidden_size = dim
+        self.num_heads_per_rank = divide(self.num_heads, self.tensor_model_parallel_size)
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id: Optional[str] = None):
+        weight_need_transpose = getattr(param, "weight_need_transpose", False)
+        if weight_need_transpose:
+            loaded_weight = get_tensor(loaded_weight).transpose([1, 0])
+        load_bias = getattr(param, "load_bias", None)
+        if load_bias:
+            head_dim = self.hidden_size // self.num_heads
+            shard_weight = loaded_weight[...].reshape([3, self.num_heads, head_dim])
+            shard_weight = paddle.split(shard_weight, self.tensor_model_parallel_size, axis=-2)[
+                self.tensor_parallel_rank
+            ]
+            shard_weight = shard_weight.reshape([-1])
+        else:
+            shard_weight = loaded_weight[...].reshape(
+                [
+                    self.hidden_size,
+                    3,
+                    self.num_heads,
+                    self.head_dim,
+                ]
+            )
+            shard_weight = paddle.split(shard_weight, self.tensor_model_parallel_size, axis=-2)[
+                self.tensor_parallel_rank
+            ]
+            shard_weight = shard_weight.reshape([self.hidden_size, -1])
+        shard_weight = fd_cast(shard_weight, param)
+        assert param.shape == shard_weight.shape, (
+            f" Attempted to load weight ({shard_weight.shape}) " f"into parameter ({param.shape})"
+        )
+        shard_weight = get_tensor(shard_weight)
+        param.copy_(shard_weight, False)
 
     def forward(
         self,
         hidden_states: paddle.Tensor,
         cu_seqlens: paddle.Tensor,
+        max_seqlen: int,
         rotary_pos_emb: paddle.Tensor = None,
     ) -> paddle.Tensor:
         """_summary_
@@ -125,7 +180,7 @@ class VisionFlashAttention2(nn.Layer):
                 [
                     seq_length,
                     3,
-                    self.num_heads // self.tensor_parallel_degree,
+                    self.num_heads // self.tensor_model_parallel_size,
                     -1,
                 ]
             )
@@ -135,8 +190,6 @@ class VisionFlashAttention2(nn.Layer):
 
         q = apply_rotary_pos_emb_vision(q.unsqueeze(axis=0), rotary_pos_emb).squeeze(axis=0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(axis=0), rotary_pos_emb).squeeze(axis=0)
-
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
         softmax_scale = self.head_dim**-0.5
 
@@ -216,12 +269,13 @@ class VisionMlp(nn.Layer):
         hidden_dim: int,
         bias: bool = False,
         hidden_act: str = "gelu",
-        tensor_parallel_degree: int = 1,
+        tensor_model_parallel_size: int = 1,
+        model_format: str = "",
     ) -> None:
         super().__init__()
-        self.tensor_parallel_degree = tensor_parallel_degree
+        self.tensor_model_parallel_size = tensor_model_parallel_size
 
-        if self.tensor_parallel_degree > 1:
+        if self.tensor_model_parallel_size > 1:
             self.gate_proj = ColumnParallelLinear(
                 dim,
                 hidden_dim,
@@ -245,11 +299,23 @@ class VisionMlp(nn.Layer):
                 input_is_parallel=True,
                 has_bias=bias,
             )
+            set_weight_attrs(self.gate_proj.weight, {"output_dim": True})
+            set_weight_attrs(self.up_proj.weight, {"output_dim": True})
+            set_weight_attrs(self.down_proj.weight, {"output_dim": False})
+            if bias:
+                set_weight_attrs(self.gate_proj.bias, {"output_dim": True})
+                set_weight_attrs(self.up_proj.bias, {"output_dim": True})
+                # set_weight_attrs(self.down_proj.bias, {"output_dim": False})
 
         else:
             self.gate_proj = nn.Linear(dim, hidden_dim, bias_attr=bias)
             self.up_proj = nn.Linear(dim, hidden_dim, bias_attr=bias)
             self.down_proj = nn.Linear(hidden_dim, dim, bias_attr=bias)
+
+        set_weight_attrs(self.gate_proj.weight, {"weight_need_transpose": model_format == "torch"})
+        set_weight_attrs(self.up_proj.weight, {"weight_need_transpose": model_format == "torch"})
+        set_weight_attrs(self.down_proj.weight, {"weight_need_transpose": model_format == "torch"})
+
         self.act = ACT2FN[hidden_act]
 
     def forward(self, x) -> paddle.Tensor:
@@ -352,8 +418,10 @@ class DFNRopeVisionBlock(nn.Layer):
         num_heads: int,
         mlp_hidden_dim: int,
         hidden_act: str = "gelu",
-        tensor_parallel_degree: int = 1,
+        tensor_model_parallel_size: int = 1,
+        tensor_parallel_rank: int = 0,
         attn_implementation: str = "sdpa",
+        model_format: str = "",
     ) -> None:
         """_summary_
 
@@ -362,14 +430,15 @@ class DFNRopeVisionBlock(nn.Layer):
             attn_implementation (str, optional): _description_. Defaults to "sdpa".
         """
         super().__init__()
-
         self.norm1 = Qwen2RMSNorm(dim, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(dim, eps=1e-6)
 
         self.attn = VisionFlashAttention2(
             dim=dim,
             num_heads=num_heads,
-            tensor_parallel_degree=tensor_parallel_degree,
+            tensor_model_parallel_size=tensor_model_parallel_size,
+            tensor_parallel_rank=tensor_parallel_rank,
+            model_format=model_format,
         )
 
         self.mlp = VisionMlp(
@@ -377,10 +446,11 @@ class DFNRopeVisionBlock(nn.Layer):
             hidden_dim=mlp_hidden_dim,
             bias=True,
             hidden_act=hidden_act,
-            tensor_parallel_degree=tensor_parallel_degree,
+            tensor_model_parallel_size=tensor_model_parallel_size,
+            model_format=model_format,
         )
 
-    def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> paddle.Tensor:
+    def forward(self, hidden_states, cu_seqlens, max_seqlen, rotary_pos_emb) -> paddle.Tensor:
         """_summary_
 
         Args:
@@ -395,6 +465,7 @@ class DFNRopeVisionBlock(nn.Layer):
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
             rotary_pos_emb=rotary_pos_emb,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
@@ -408,7 +479,13 @@ class PatchMerger(nn.Layer):
         nn (_type_): _description_
     """
 
-    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
+    def __init__(
+        self,
+        dim: int,
+        context_dim: int,
+        spatial_merge_size: int = 2,
+        model_format: str = "",
+    ) -> None:
         """_summary_
 
         Args:
@@ -424,6 +501,9 @@ class PatchMerger(nn.Layer):
             nn.GELU(),
             nn.Linear(self.hidden_size, dim, bias_attr=True),
         )
+
+        set_weight_attrs(self.mlp[0].weight, {"weight_need_transpose": model_format == "torch"})
+        set_weight_attrs(self.mlp[2].weight, {"weight_need_transpose": model_format == "torch"})
 
     def forward(self, x: paddle.Tensor) -> paddle.Tensor:
         """_summary_
@@ -470,6 +550,8 @@ class DFNRopeVisionTransformerPretrainedModel(PretrainedModel):
             hidden_size=config.vision_config.hidden_size,
         )
 
+        model_format = getattr(config, "model_format", "")
+
         head_dim = config.vision_config.hidden_size // config.vision_config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
 
@@ -480,14 +562,18 @@ class DFNRopeVisionTransformerPretrainedModel(PretrainedModel):
                     num_heads=config.vision_config.num_heads,
                     mlp_hidden_dim=config.vision_config.intermediate_size,
                     hidden_act=config.vision_config.hidden_act,
-                    tensor_parallel_degree=config.pretrained_config.tensor_parallel_degree,
+                    tensor_model_parallel_size=config.pretrained_config.tensor_model_parallel_size,
+                    tensor_parallel_rank=config.pretrained_config.tensor_parallel_rank,
+                    model_format=model_format,
                 )
                 for _ in range(config.vision_config.depth)
             ]
         )
 
         self.merger = PatchMerger(
-            dim=config.vision_config.out_hidden_size, context_dim=config.vision_config.hidden_size
+            dim=config.vision_config.out_hidden_size,
+            context_dim=config.vision_config.hidden_size,
+            model_format=model_format,
         )
 
     @property
@@ -574,6 +660,13 @@ class DFNRopeVisionTransformerPretrainedModel(PretrainedModel):
         cu_seqlens_thw = paddle.repeat_interleave(paddle.tensor([h * w], dtype=paddle.int32), t)
         return (rotary_pos_emb_thw, window_index_thw, cu_seqlens_window_thw, cu_seqlens_thw)
 
+    def compute_attn_mask_seqlen(
+        self,
+        cu_seqlens: paddle.Tensor,
+    ) -> int:
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        return max_seqlen
+
     def forward(self, hidden_states: paddle.Tensor, grid_thw: paddle.Tensor, num_pad=0) -> paddle.Tensor:
         """_summary_
 
@@ -604,15 +697,21 @@ class DFNRopeVisionTransformerPretrainedModel(PretrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen_full
             else:
                 cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_seqlen_window
 
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens_now,
+                max_seqlen=max_seqlen_now,
                 rotary_pos_emb=rotary_pos_emb,
             )
 
@@ -633,65 +732,6 @@ class DFNRopeVisionTransformerPretrainedModel(PretrainedModel):
             paddle.Tensor: _description_
         """
         return self.forward(hidden_states, grid_thw)
-
-    @classmethod
-    def _get_tensor_parallel_mappings(cls, config, is_split=True):
-        """
-        dummy
-        """
-
-        from paddleformers.transformers.conversion_utils import split_or_merge_func
-
-        fn = split_or_merge_func(
-            is_split=is_split,
-            tensor_parallel_degree=config.tensor_parallel_degree,
-            tensor_parallel_rank=config.tensor_parallel_rank,
-        )
-        vision_config = config.vision_config
-
-        def split_qkv_weight(x):
-            head_dim = vision_config.hidden_size // vision_config.num_heads
-            x = x.reshape(
-                [
-                    vision_config.hidden_size,
-                    3,
-                    vision_config.num_heads,
-                    head_dim,
-                ]
-            )
-            x = np.split(x, vision_config.tensor_parallel_degree, axis=-2)[vision_config.tensor_parallel_rank]
-            x = x.reshape([vision_config.hidden_size, -1])
-            return x
-
-        def split_qkv_bias(x):
-            head_dim = vision_config.hidden_size // vision_config.num_heads
-            x = x.reshape([3, vision_config.num_heads, head_dim])
-            x = np.split(x, vision_config.tensor_parallel_degree, axis=-2)[vision_config.tensor_parallel_rank]
-            x = x.reshape([-1])
-            return x
-
-        def get_tensor_parallel_split_mappings(depth):
-            final_actions = {}
-            base_actions = {
-                "visual.blocks.0.attn.proj.weight": partial(fn, is_column=False),
-                "visual.blocks.0.mlp.gate_proj.weight": partial(fn, is_column=True),
-                "visual.blocks.0.mlp.gate_proj.bias": partial(fn, is_column=True),
-                "visual.blocks.0.mlp.up_proj.weight": partial(fn, is_column=True),
-                "visual.blocks.0.mlp.up_proj.bias": partial(fn, is_column=True),
-                "visual.blocks.0.mlp.down_proj.weight": partial(fn, is_column=False),
-                "visual.blocks.0.qkv.weight": split_qkv_weight,
-                "visual.blocks.0.qkv.bias": split_qkv_bias,
-            }
-
-            for key, action in base_actions.items():
-                if "blocks.0." in key:
-                    for i in range(depth):
-                        newkey = key.replace("blocks.0.", f"blocks.{i}.")
-                        final_actions[newkey] = action
-            return final_actions
-
-        mappings = get_tensor_parallel_split_mappings(vision_config.depth)
-        return mappings
 
     def load_state_dict(self, state_dict):
         params_dict = dict(self.named_parameters())

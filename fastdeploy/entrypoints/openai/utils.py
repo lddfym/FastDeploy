@@ -17,12 +17,16 @@
 import asyncio
 import heapq
 import random
+import time
+from multiprocessing.reduction import ForkingPickler
 
 import aiozmq
-import msgpack
 import zmq
 
-from fastdeploy.utils import api_server_logger
+from fastdeploy.engine.args_utils import EngineArgs
+from fastdeploy.metrics.metrics import main_process_metrics
+from fastdeploy.metrics.stats import ZMQMetricsStats
+from fastdeploy.utils import FlexibleArgumentParser, api_server_logger
 
 UVICORN_CONFIG = {
     "version": 1,
@@ -120,10 +124,21 @@ class DealerConnectionManager:
         while self.running:
             try:
                 raw_data = await dealer.read()
-                response = msgpack.unpackb(raw_data[-1])
+                response = ForkingPickler.loads(raw_data[-1])
+                _zmq_metrics_stats = ZMQMetricsStats()
+                _zmq_metrics_stats.msg_recv_total += 1
+                if "zmq_send_time" in response:
+                    _zmq_metrics_stats.zmq_latency = time.perf_counter() - response["zmq_send_time"]
+                address = dealer.transport.getsockopt(zmq.LAST_ENDPOINT)
+                main_process_metrics.record_zmq_stats(_zmq_metrics_stats, address)
+
                 request_id = response[-1]["request_id"]
-                if "cmpl" == request_id[:4]:
-                    request_id = request_id.rsplit("-", 1)[0]
+                if request_id[:4] in ["cmpl", "embd"]:
+                    request_id = request_id.rsplit("_", 1)[0]
+                elif "reward" == request_id[:6]:
+                    request_id = request_id.rsplit("_", 1)[0]
+                elif "chatcmpl" == request_id[:8]:
+                    request_id = request_id.rsplit("_", 1)[0]
                 async with self.lock:
                     if request_id in self.request_map:
                         await self.request_map[request_id].put(response)
@@ -201,3 +216,40 @@ class DealerConnectionManager:
             self.request_map.clear()
 
         api_server_logger.info("All connections and tasks closed")
+
+
+def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    parser.add_argument("--port", default=8000, type=int, help="port to the http server")
+    parser.add_argument("--host", default="0.0.0.0", type=str, help="host to the http server")
+    parser.add_argument("--workers", default=1, type=int, help="number of workers")
+    parser.add_argument("--metrics-port", default=None, type=int, help="port for metrics server")
+    parser.add_argument("--controller-port", default=-1, type=int, help="port for controller server")
+    parser.add_argument(
+        "--max-waiting-time",
+        default=-1,
+        type=int,
+        help="max waiting time for connection, if set value -1 means no waiting time limit",
+    )
+    parser.add_argument("--max-concurrency", default=512, type=int, help="max concurrency")
+
+    parser.add_argument(
+        "--enable-mm-output", action="store_true", help="Enable 'multimodal_content' field in response output. "
+    )
+    parser.add_argument(
+        "--timeout-graceful-shutdown",
+        default=0,
+        type=int,
+        help="timeout for graceful shutdown in seconds (used by gunicorn).Setting it to 0 has the effect of infinite timeouts by disabling timeouts for all workers entirely.",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        default=0,
+        type=int,
+        help="Workers silent for more than this many seconds are killed and restarted.Value is a positive number or 0. Setting it to 0 has the effect of infinite timeouts by disabling timeouts for all workers entirely.",
+    )
+
+    parser.add_argument("--api-key", type=str, action="append", help="API_KEY required for service authentication")
+
+    parser = EngineArgs.add_cli_args(parser)
+    return parser

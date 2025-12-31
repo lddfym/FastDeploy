@@ -40,12 +40,10 @@ def get_block_shape_and_split_kv_block(
     kv_batch_ids: paddle.Tensor,
     kv_tile_ids_per_batch: paddle.Tensor,
     kv_num_blocks_x_cpu: paddle.Tensor,
-    max_len_kv_cpu: paddle.Tensor,
     encoder_block_shape_q: int,
     decoder_block_shape_q: int,
     group_size: int,
     block_size: int,
-    decoder_step_token_num: int,
 ):
     """
     get_block_shape_and_split_kv_block
@@ -67,12 +65,10 @@ def get_block_shape_and_split_kv_block(
             kv_batch_ids,
             kv_tile_ids_per_batch,
             kv_num_blocks_x_cpu,
-            max_len_kv_cpu,
             encoder_block_shape_q,
             decoder_block_shape_q,
             group_size,
             block_size,
-            decoder_step_token_num,
         )
 
     else:

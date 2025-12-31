@@ -51,8 +51,14 @@ def parse_quant_config(args, model_config, is_ernie, is_v1_loader):
             if quantization_config is not None:
                 if "is_quantized" in quantization_config:
                     model_config.is_quantized = quantization_config["is_quantized"]
+                elif "is_moe_quantized" in quantization_config:
+                    model_config.is_moe_quantized = quantization_config["is_moe_quantized"]
                 elif "kv_cache_quant_type" not in quantization_config:
                     model_config.is_quantized = True
+                    if "is_moe_quantized" not in quantization_config:
+                        model_config.is_quantized = True
+                    else:
+                        model_config.is_moe_quantized = True
             if quantization_config is not None and quantization_config.get("quantization", None) is None:
                 raise ValueError(
                     "quantization_config should have a key named 'quantization' for specify quant config."
@@ -78,6 +84,14 @@ def parse_quant_config(args, model_config, is_ernie, is_v1_loader):
             quantization_config["moe_quant_type"] = "wint4"
             quantization_config["quantization"] = "mix_quant"
             quant_config_name = "mix_quant"
+        # Special handling for moe w4afp8 dynamic quant
+        elif quant_config_name == "w4afp8":
+            quantization_config["dense_quant_type"] = "block_wise_fp8"
+            quantization_config["moe_quant_type"] = "w4afp8"
+            tp_size = getattr(args, "tensor_parallel_size", 1)
+            quantization_config["hadamard_block_size"] = 512 // tp_size
+            quantization_config["quantization"] = "mix_quant"
+            quant_config_name = "mix_quant"
     else:
         quant_config_name = None
     if quant_config_name is None:
@@ -85,6 +99,8 @@ def parse_quant_config(args, model_config, is_ernie, is_v1_loader):
     else:
         if not quantization_config.get("is_quantized"):
             quantization_config["is_quantized"] = model_config.is_quantized
+        if args.dynamic_load_weight and quantization_config is not None:
+            quantization_config["is_quantized"] = True
         quant_cls = get_quantization_config(quant_config_name)
         quant_config = quant_cls.from_config(quantization_config)
     return quant_config

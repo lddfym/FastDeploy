@@ -1,3 +1,17 @@
+# Copyright (c) 2025  PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -6,10 +20,8 @@ from fastdeploy.entrypoints.cli.main import main as cli_main
 
 class TestCliMain(unittest.TestCase):
     @patch("fastdeploy.utils.FlexibleArgumentParser")
-    @patch("fastdeploy.entrypoints.cli.main.importlib.metadata")
-    def test_main_basic(self, mock_metadata, mock_parser):
+    def test_main_basic(self, mock_parser):
         # Setup mocks
-        mock_metadata.version.return_value = "1.0.0"
         mock_args = MagicMock()
         mock_args.subparser = None
         mock_parser.return_value.parse_args.return_value = mock_args
@@ -18,7 +30,6 @@ class TestCliMain(unittest.TestCase):
         cli_main()
 
         # Verify version check
-        mock_metadata.version.assert_called_once_with("fastdeploy-gpu")
         mock_args.dispatch_function.assert_called_once()
 
 

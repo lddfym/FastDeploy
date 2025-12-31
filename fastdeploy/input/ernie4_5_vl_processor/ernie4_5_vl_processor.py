@@ -21,10 +21,12 @@ from paddleformers.generation import GenerationConfig
 
 from fastdeploy.engine.request import Request
 from fastdeploy.input.ernie4_5_processor import Ernie4_5Processor
-from fastdeploy.input.utils import IDS_TYPE_FLAG
+from fastdeploy.input.utils import IDS_TYPE_FLAG, process_stop_token_ids
 from fastdeploy.utils import data_processor_logger
 
 from .process import DataProcessor
+
+_SAMPLING_EPS = 1e-5
 
 
 class Ernie4_5_VLProcessor(Ernie4_5Processor):
@@ -37,6 +39,7 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
         mm_processor_kwargs=None,
         reasoning_parser_obj=None,
         tool_parser_obj=None,
+        enable_processor_cache=False,
     ):
         data_processor_logger.info(f"model_name_or_path: {model_name_or_path}")
         tokenizer_path = model_name_or_path
@@ -46,6 +49,7 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
         self.ernie4_5_processor = DataProcessor(
             tokenizer_name=tokenizer_path,
             image_preprocessor_name=preprocessor_path,
+            enable_processor_cache=enable_processor_cache,
             **processor_kwargs,
         )
         self.ernie4_5_processor.eval()
@@ -54,6 +58,7 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
 
         self.tool_parser_dict = dict()
         self.decode_status = dict()
+        self.model_status_dict = dict()
         self._load_tokenizer()
 
         # Generation config
@@ -113,7 +118,6 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
 
     def process_request(self, request, max_model_len=None, **kwargs):
         """process the input data"""
-        request.chat_template = kwargs.get("chat_template")
         task = request.to_dict()
         task["chat_template_kwargs"] = kwargs.get("chat_template_kwargs")
         self.process_request_dict(task, max_model_len)
@@ -204,11 +208,8 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
         if not request.get("eos_token_ids"):
             request["eos_token_ids"] = self.eos_token_ids
 
-        stop_sequences = request.get("stop", [])
-        if stop_sequences:
-            stop_seqs, stop_seqs_len = self.update_stop_seq(stop_sequences)
-            request["stop_token_ids"] = stop_seqs
-            request["stop_seqs_len"] = stop_seqs_len
+        # processing stop_sequences and stop_token_ids
+        process_stop_token_ids(request, self.update_stop_seq)
 
         bad_words = request.get("bad_words")
         bad_words_token_ids = request.get("bad_words_token_ids")
@@ -216,14 +217,20 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
             bad_words_token_ids = self.update_bad_words(bad_words, bad_words_token_ids)
             request["bad_words_token_ids"] = bad_words_token_ids
 
-        if request.get("prompt"):
+        if request.get("prompt_token_ids"):
+            messages = request.get("messages")
+            if messages:
+                self._check_mm_limits(messages)
+            request.setdefault("enable_thinking", True)
+            outputs = self.ernie4_5_processor.prompt_token_ids2outputs(request)
+        elif request.get("prompt"):
             multimodal_data = request.get("multimodal_data")
             if multimodal_data is None:
                 multimodal_data = {}
             self._check_mm_limits(multimodal_data)
             images = multimodal_data.get("image", None)
             videos = multimodal_data.get("video", None)
-            request["text_after_process"] = request.get("prompt")
+            request["prompt_tokens"] = request.get("prompt")
             outputs = self.ernie4_5_processor.text2ids(request["prompt"], images, videos)
         elif request.get("messages"):
             messages = request["messages"]
@@ -232,28 +239,52 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
             if chat_template_kwargs:
                 if isinstance(chat_template_kwargs, dict):
                     for k, v in chat_template_kwargs.items():
-                        if k not in request:
+                        if k not in request or request[k] is None:
                             request[k] = v
                 else:
                     raise ValueError("Invalid input: chat_template_kwargs must be a dict")
-            request.setdefault("enable_thinking", True)
             outputs = self.ernie4_5_processor.request2ids(request)
         else:
             raise ValueError(f"Request must contain 'prompt', or 'messages': {request}")
 
         if request.get("completion_token_ids"):
             self.append_completion_tokens(outputs, request["completion_token_ids"])
+
         outputs = self.pack_outputs(outputs)
-        request["prompt_token_ids"] = outputs["input_ids"].tolist()
+        request["prompt_token_ids"] = (
+            outputs["input_ids"].tolist()
+            if ("prompt_token_ids" not in request or not request["prompt_token_ids"])
+            else request["prompt_token_ids"]
+        )
         request["prompt_token_ids_len"] = len(request["prompt_token_ids"])
         request["multimodal_inputs"] = outputs
 
         # 截断超过长度限制的prompt
         if max_model_len is not None and len(request["prompt_token_ids"]) > max_model_len:
             request["prompt_token_ids"] = request["prompt_token_ids"][: max_model_len - 1]
+
         if request.get("max_tokens") is None:
             request["max_tokens"] = max(1, max_model_len - len(request["prompt_token_ids"]))
+        else:
+            request["max_tokens"] = min(max_model_len - len(request["prompt_token_ids"]), request["max_tokens"])
+        if request.get("reasoning_max_tokens") is None:
+            request["reasoning_max_tokens"] = max(int(request["max_tokens"] * 0.8), 1)
         data_processor_logger.info(f"Processed request {request}")
+
+        if self.reasoning_parser:
+            model_status = self.reasoning_parser.get_model_status(request["prompt_token_ids"])
+            parts = request["request_id"].split("_")
+            if len(parts) > 1:
+                real_req_id = parts[0]
+                index = int(parts[1])
+                n = request.get("n", 1)
+                for idx in range(index * n, (index + 1) * n):
+                    self.model_status_dict[f"{real_req_id}_{idx}"] = model_status
+            else:
+                self.model_status_dict[request["request_id"]] = model_status
+            request["enable_thinking"] = model_status == "think_start"
+        if request.get("top_p") is not None and request.get("top_p") < _SAMPLING_EPS:
+            request["top_p"] = _SAMPLING_EPS
 
         return request
 
@@ -285,23 +316,5 @@ class Ernie4_5_VLProcessor(Ernie4_5Processor):
         outs["input_ids"] = np.array(outs["input_ids"], dtype=np.int64)
         outs["token_type_ids"] = np.array(outs["token_type_ids"], dtype=np.int64)
         outs["position_ids"] = np.array(outs["position_ids"], dtype=np.int64)
-
+        outs["mm_num_token_func"] = self.ernie4_5_processor.mm_num_tokens
         return outs
-
-    def process_response_dict(self, response_dict, stream, **kwargs):
-        """
-        Preprocess the response
-
-        Args:
-            response_dict (Dict): response for engine, contain ids fields
-
-        Returns:
-            Dict: response contain text fields
-        """
-        enable_thinking = kwargs.pop("enable_thinking", True)
-        if enable_thinking is None:
-            enable_thinking = True
-        if stream:
-            return self.process_response_dict_streaming(response_dict, enable_thinking=enable_thinking, **kwargs)
-        else:
-            return self.process_response_dict_normal(response_dict, enable_thinking=enable_thinking, **kwargs)

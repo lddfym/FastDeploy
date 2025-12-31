@@ -25,6 +25,7 @@ from paddle.distributed.communication.group import Group
 from fastdeploy.distributed.custom_all_reduce import cuda_wrapper
 from fastdeploy.model_executor.ops.gpu import (
     all_reduce,
+    clear_ipc_handles,
     dispose,
     get_graph_buffer_ipc_meta,
     init_custom_all_reduce,
@@ -206,19 +207,26 @@ class CustomAllreduce:
 
     def custom_all_reduce(self, input: paddle.Tensor) -> Optional[paddle.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
+
+        if input.shape[0] == 0:
+            return input
+
         if self.capturing:
             lib = cuda_wrapper.CudaRTLibrary()
             stream = paddle.device.current_stream()
             stream_capturing = lib.cudaStreamIsCapturing(stream)
             if stream_capturing.value == 1:
                 # 1 is cudaStreamCaptureStatusActive: The stream is capturing.
-                return self.all_reduce(input, input, registered=True)
+                return self.all_reduce(input, registered=True)
             else:
                 # If warm up, mimic the allocation pattern since custom
                 # allreduce is out-of-place.
                 return paddle.empty_like(input)
         else:
-            return self.all_reduce(input, input, registered=False)
+            return self.all_reduce(input, registered=False)
+
+    def clear_ipc_handles(self):
+        clear_ipc_handles(self._ptr)
 
     def close(self):
         if self._ptr:

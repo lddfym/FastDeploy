@@ -15,7 +15,12 @@ import time
 from typing import Any, Union
 
 import pytest
-from model_loader.utils import clean_ports
+from e2e.utils.serving_utils import (
+    FD_API_PORT,
+    FD_CACHE_QUEUE_PORT,
+    FD_ENGINE_QUEUE_PORT,
+    clean_ports,
+)
 
 
 class FDRunner:
@@ -23,6 +28,7 @@ class FDRunner:
         self,
         model_name_or_path: str,
         tensor_parallel_size: int = 1,
+        max_num_seqs: int = 1,
         max_model_len: int = 1024,
         load_choices: str = "default",
         quantization: str = "None",
@@ -30,17 +36,21 @@ class FDRunner:
     ) -> None:
         from fastdeploy.entrypoints.llm import LLM
 
-        ports_to_clean = []
-        if "engine_worker_queue_port" in kwargs:
-            ports_to_clean.append(kwargs["engine_worker_queue_port"])
-        clean_ports(ports_to_clean)
-        time.sleep(5)
+        clean_ports()
+        time.sleep(10)
+        graph_optimization_config = {"use_cudagraph": False}
         self.llm = LLM(
             model=model_name_or_path,
             tensor_parallel_size=tensor_parallel_size,
+            max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
             load_choices=load_choices,
             quantization=quantization,
+            max_num_batched_tokens=max_model_len,
+            graph_optimization_config=graph_optimization_config,
+            port=FD_API_PORT,
+            cache_queue_port=FD_CACHE_QUEUE_PORT,
+            engine_worker_queue_port=FD_ENGINE_QUEUE_PORT,
             **kwargs,
         )
 

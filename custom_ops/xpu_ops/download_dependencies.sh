@@ -12,8 +12,8 @@ rm -rf "$THIRDPARTY_DIR"
 mkdir -p "$THIRDPARTY_DIR" || exit 1
 
 if [ "$1" == "stable" ]; then
-    version_xvllm="20250902"
-    version_xtdk="3.4.40.1"
+    version_xvllm="20251017"
+    version_xtdk="3.4.0.1"
 else
     version_xvllm="latest"
     version_xtdk="latest"
@@ -26,14 +26,14 @@ fi
     rm -rf output* xvllm* xtdk-llvm* output.tar.gz xtdk-llvm*tar.gz
 
     # Download and install xvllm
-    if ! wget "https://klx-sdk-release-public.su.bcebos.com/xinfer/daily/eb/${version_xvllm}/output.tar.gz"; then
+    if ! wget -q "https://klx-sdk-release-public.su.bcebos.com/xinfer/daily/eb/${version_xvllm}/output.tar.gz"; then
         echo "Error downloading xvllm"
         exit 2
     fi
     tar -zxf output.tar.gz && mv output xvllm && rm output.tar.gz
 
     # Download and install xtdk
-    if ! wget "https://klx-sdk-release-public.su.bcebos.com/xtdk_15fusion/dev/${version_xtdk}/xtdk-llvm15-ubuntu2004_x86_64.tar.gz"; then
+    if ! wget -q "https://klx-sdk-release-public.su.bcebos.com/xtdk_15fusion/dev/${version_xtdk}/xtdk-llvm15-ubuntu2004_x86_64.tar.gz"; then
         echo "Error downloading xtdk"
         exit 3
     fi

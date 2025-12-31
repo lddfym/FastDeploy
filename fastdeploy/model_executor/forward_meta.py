@@ -17,12 +17,14 @@
 import logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import paddle
 
 from fastdeploy.model_executor.layers.attention import AttentionBackend
 
+if TYPE_CHECKING:
+    from fastdeploy.model_executor.layers.attention import AttentionBackend_HPU
 logger = logging.getLogger(__name__)
 
 
@@ -63,8 +65,6 @@ class ForwardMeta:
     ForwardMeta is used to store the global meta information of the model forward.
     """
 
-    # Input tokens IDs
-    input_ids: paddle.Tensor
     # Input tokens IDs of removed padding
     ids_remove_padding: paddle.Tensor
     # Rotation position embedding
@@ -117,8 +117,6 @@ class ForwardMeta:
     kv_tile_ids_per_batch: Optional[paddle.Tensor] = None
     # The number of CUDA blocks to launch in the x-dimension for the append_write_cache_kv kernel, defining its grids.x.
     kv_num_blocks_x_cpu: Optional[paddle.Tensor] = None
-    # The maximum sequence length of the KV cache, which may represent the current maximum decoder length.
-    max_len_kv_cpu: Optional[paddle.Tensor] = None
 
     decoder_chunk_size_device: Optional[paddle.Tensor] = None
 
@@ -142,6 +140,17 @@ class ForwardMeta:
     block_tables: Optional[paddle.Tensor] = None
     # KV caches
     caches: Optional[list[paddle.Tensor]] = None
+    # Flag of profile run
+    is_dummy_or_profile_run: bool = False
+    # Routing Replay table buffer
+    routing_replay_table: Optional[paddle.Tensor] = None
+
+    # chunked MoE related
+    moe_num_chunk: int = 1
+    max_moe_num_chunk: int = 1
+
+    # for zero size
+    is_zero_size: bool = False
 
     def clear_caches(self):
         """Safely clean up the caches"""
@@ -165,7 +174,7 @@ class ForwardMeta:
                     "shape": obj.shape,
                     "dtype": str(obj.dtype),
                     "place": str(obj.place),
-                    # "content": obj if obj.numel()<10 else "Too big to show"
+                    "content": obj if obj.numel() < 70 else "Too big to show",
                 }
                 return tensor_info
             elif isinstance(obj, (list, tuple)):
@@ -191,7 +200,7 @@ class XPUForwardMeta(ForwardMeta):
 
     # Accumulated offset
     cum_offsets: Optional[paddle.Tensor] = None
-    # TODO(wanghaitao): Supplementary notes
+    # TODO(yinwei): Supplementary notes
     #
     encoder_batch_map: Optional[paddle.Tensor] = None
     #
@@ -203,10 +212,17 @@ class XPUForwardMeta(ForwardMeta):
     #
     encoder_seq_lod: Optional[paddle.Tensor] = None
     #
+    decoder_seq_lod: Optional[paddle.Tensor] = None
+    #
+    encoder_kv_lod: Optional[paddle.Tensor] = None
+    #
+    prefix_len: Optional[paddle.Tensor] = None
+    #
     decoder_context_len: Optional[paddle.Tensor] = None
     #
     decoder_context_len_cache: Optional[paddle.Tensor] = None
-
+    #
+    prefix_block_tables: Optional[paddle.Tensor] = None
     #
     encoder_batch_map_cpu: Optional[paddle.Tensor] = None
     #
@@ -218,10 +234,17 @@ class XPUForwardMeta(ForwardMeta):
     #
     encoder_seq_lod_cpu: Optional[paddle.Tensor] = None
     #
+    decoder_seq_lod_cpu: Optional[paddle.Tensor] = None
+    #
+    encoder_kv_lod_cpu: Optional[paddle.Tensor] = None
+    #
+    prefix_len_cpu: Optional[paddle.Tensor] = None
+    #
     decoder_context_len_cpu: Optional[paddle.Tensor] = None
     #
     decoder_context_len_cache_cpu: Optional[paddle.Tensor] = None
-
+    #
+    len_info_cpu: Optional[paddle.Tensor] = None
     #
     batch_tensor: Optional[paddle.Tensor] = None
     #
@@ -230,6 +253,8 @@ class XPUForwardMeta(ForwardMeta):
     dec_batch: Optional[paddle.Tensor] = None
     #
     total_enc_len: Optional[paddle.Tensor] = None
+    # for pd_disaggregation
+    kv_signal_sender: Optional[paddle.Tensor] = None
 
 
 @dataclass
@@ -240,3 +265,119 @@ class DCUForwardMeta(ForwardMeta):
 
     # Accumulated offset
     cum_offsets: Optional[paddle.Tensor] = None
+
+
+@dataclass
+class HPUForwardMeta(ForwardMeta):
+    """
+    HPUForwardMeta is used to store the global meta information of the forward on intel HPU.
+    """
+
+    #
+    input_ids: paddle.Tensor = None
+
+    # attention meta
+    forward_mode: ForwardMode = ForwardMode.MIXED
+
+    #
+    ids_remove_padding: paddle.Tensor = None
+
+    #
+    seq_lens_encoder: Optional[paddle.Tensor] = None
+
+    #
+    seq_lens_decoder: Optional[paddle.Tensor] = None
+
+    #
+    seq_lens_this_time: Optional[paddle.Tensor] = None
+
+    #
+    cum_offsets: Optional[paddle.Tensor] = None
+
+    #
+    block_tables: Optional[paddle.Tensor] = None
+
+    #
+    block_groups: Optional[paddle.Tensor] = None
+
+    #
+    block_list: Optional[paddle.Tensor] = None
+
+    #
+    block_indices: Optional[paddle.Tensor] = None
+
+    #
+    block_offsets: Optional[paddle.Tensor] = None
+
+    #
+    block_mapping: Optional[paddle.Tensor] = None
+
+    #
+    attention_mask: Optional[paddle.Tensor] = None
+
+    #
+    block_size: Optional[paddle.Tensor] = None
+
+    #
+    batch_ids: Optional[paddle.Tensor] = None
+
+    #
+    total_batch: Optional[paddle.Tensor] = None
+
+    #
+    is_prompt: Optional[paddle.Tensor] = None
+
+    #
+    attn_backend: "AttentionBackend_HPU" = None
+
+    #
+    rotary_embs: Optional[paddle.Tensor] = None
+
+    #
+    caches: Optional[paddle.Tensor] = None
+
+    #
+    attn_mask: Optional[paddle.Tensor] = None
+
+    #
+    pre_caches_length: int = 0
+
+    # AMAX measurement of activations in bf16 mode for quantization calibration
+    measurement_mode: bool = False
+
+    @classmethod
+    def init_forward_meta(cls, share_inputs: Dict, attn_backend: "AttentionBackend_HPU"):
+        """init forward meta"""
+        # TODO(gongshaotian): delete this func
+        is_prompt = share_inputs["is_prompt"]
+        forward_mode = ForwardMode.DECODE
+        if is_prompt:
+            forward_mode = ForwardMode.EXTEND
+        ret = cls(
+            forward_mode=forward_mode,
+            input_ids=share_inputs["input_ids"],
+            ids_remove_padding=share_inputs["ids_remove_padding"],
+            seq_lens_encoder=share_inputs["seq_lens_encoder"],
+            seq_lens_decoder=share_inputs["seq_lens_decoder"],
+            seq_lens_this_time=share_inputs["seq_lens_this_time"],
+            block_tables=share_inputs["block_tables"],
+            block_groups=share_inputs["block_groups"],
+            block_list=share_inputs["block_list"],
+            block_indices=share_inputs["block_indices"],
+            block_offsets=share_inputs["block_offsets"],
+            block_mapping=share_inputs["block_mapping"],
+            attention_mask=share_inputs["block_bias"],
+            block_size=share_inputs["block_size"],
+            total_batch=share_inputs["total_batch"],
+            batch_ids=share_inputs["batch_ids"],
+            is_prompt=share_inputs["is_prompt"],
+            attn_backend=attn_backend,
+            rotary_embs=share_inputs["rotary_embs"],
+            caches=share_inputs["caches"],
+        )
+        return ret
+
+    def clear_caches(self):
+        """safe clear caches"""
+        if self.caches:
+            del self.caches

@@ -46,6 +46,7 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
                 "finished": True,
             },
             "output_token_ids": 3,
+            "metrics": {},
         }
         self.mock_engine.generate.return_value = [mock_output]
 
@@ -57,7 +58,8 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             model_name="test_model",
             prompt_batched_token_ids=[[1, 2]],
             completion_batched_token_ids=[[3, 4, 5]],
-            text_after_process_list=["test prompt"],
+            prompt_tokens_list=["test prompt"],
+            max_tokens_list=[100],
         )
 
         self.assertEqual(response.choices[0].text, "test prompt generated text")
@@ -79,6 +81,7 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
                 "finished": True,
             },
             "output_token_ids": 3,
+            "metrics": {},
         }
         self.mock_engine.generate.return_value = [mock_output]
 
@@ -90,7 +93,8 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             model_name="test_model",
             prompt_batched_token_ids=[[1, 2]],
             completion_batched_token_ids=[[3, 4, 5]],
-            text_after_process_list=["test prompt"],
+            prompt_tokens_list=["test prompt"],
+            max_tokens_list=[100],
         )
         self.assertEqual(response.choices[0].text, "decoded_[1, 2, 3] generated text")
 
@@ -107,10 +111,12 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             {
                 "outputs": {"text": " response1", "token_ids": [1, 2], "top_logprobs": None, "finished": True},
                 "output_token_ids": 2,
+                "metrics": {},
             },
             {
                 "outputs": {"text": " response2", "token_ids": [3, 4], "top_logprobs": None, "finished": True},
                 "output_token_ids": 2,
+                "metrics": {},
             },
         ]
         self.mock_engine.generate.return_value = mock_outputs
@@ -123,7 +129,8 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             model_name="test_model",
             prompt_batched_token_ids=[[1], [2]],
             completion_batched_token_ids=[[1, 2], [3, 4]],
-            text_after_process_list=["prompt1", "prompt2"],
+            prompt_tokens_list=["prompt1", "prompt2"],
+            max_tokens_list=[100, 100],
         )
 
         self.assertEqual(len(response.choices), 2)
@@ -143,10 +150,12 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             {
                 "outputs": {"text": " response1", "token_ids": [1, 2], "top_logprobs": None, "finished": True},
                 "output_token_ids": 2,
+                "metrics": {},
             },
             {
                 "outputs": {"text": " response2", "token_ids": [3, 4], "top_logprobs": None, "finished": True},
                 "output_token_ids": 2,
+                "metrics": {},
             },
         ]
         self.mock_engine.generate.return_value = mock_outputs
@@ -159,7 +168,8 @@ class TestCompletionEcho(unittest.IsolatedAsyncioTestCase):
             model_name="test_model",
             prompt_batched_token_ids=[[1], [2]],
             completion_batched_token_ids=[[1, 2], [3, 4]],
-            text_after_process_list=["prompt1", "prompt2"],
+            prompt_tokens_list=["prompt1", "prompt2"],
+            max_tokens_list=[100, 100],
         )
 
         self.assertEqual(len(response.choices), 2)

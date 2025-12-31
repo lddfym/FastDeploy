@@ -14,66 +14,27 @@
 # limitations under the License.
 """
 
-import math
 from typing import Optional, Union
 
 import numpy as np
-from PIL import Image
 
-from fastdeploy.input.ernie4_5_vl_processor import read_video_decord
+from fastdeploy.utils import data_processor_logger
 
-
-def read_frames(video_path):
-    """
-    Read and decode video frames from the given path
-
-    This function reads a video file and decodes it into individual RGB frames
-    using decord video reader. It also extracts video metadata including fps,
-    duration and frame count.
-
-    Args:
-        video_path (str): Path to the video file or bytes object containing video data
-
-    Returns:
-        tuple: A tuple containing:
-            frames (numpy.ndarray): Array of shape (num_frames, height, width, 3)
-                containing decoded RGB video frames
-            meta (dict): Dictionary containing video metadata:
-                - fps (float): Frames per second
-                - duration (float): Video duration in seconds
-                - num_of_frame (int): Total number of frames
-                - width (int): Frame width in pixels
-                - height (int): Frame height in pixels
-
-    Note:
-        - The function uses decord library for efficient video reading
-        - All frames are converted to RGB format regardless of input format
-    """
-    reader, meta, _ = read_video_decord(video_path, save_to_disk=False)
-
-    frames = []
-    for i in range(meta["num_of_frame"]):
-        frame = reader[i].asnumpy()
-        image = Image.fromarray(frame, "RGB")
-        frames.append(image)
-    frames = np.stack([np.array(f.convert("RGB")) for f in frames], axis=0)
-    return frames, meta
+from .image_processor import ceil_by_factor, floor_by_factor
 
 
 def sample_frames(
-    video: np.ndarray,
     frame_factor: int,
     min_frames: int,
     max_frames: int,
     metadata: Optional[dict] = None,
-    fps: Optional[Union[int, float]] = None,
-    num_frames: Optional[int] = None,
+    fps: Optional[Union[int, float]] = -1,
+    num_frames: Optional[int] = -1,
 ):
     """
     Sample frames from video according to specified criteria.
 
     Args:
-        video: Input video frames as numpy array
         frame_factor: Ensure sampled frames are multiples of this factor
         min_frames: Minimum number of frames to sample
         max_frames: Maximum number of frames to sample
@@ -89,27 +50,31 @@ def sample_frames(
                    or if required metadata is missing,
                    or if requested frames exceed available frames
     """
-    if fps is not None and num_frames is not None:
+    if fps > 0 and num_frames > 0:
         raise ValueError("`num_frames` and `fps` are mutually exclusive arguments, please use only one!")
 
-    if fps is None and num_frames is None:
-        return video
-
-    total_num_frames = video.shape[0]
+    total_num_frames = metadata["num_of_frame"]
 
     # If num_frames is not given but fps is, calculate num_frames from fps
-    if num_frames is not None:
+    if num_frames > 0:
         num_frames = round(num_frames / frame_factor) * frame_factor
-    elif fps is not None:
+    elif fps > 0:
         if metadata is None:
             raise ValueError(
                 "Asked to sample `fps` frames per second but no video metadata was provided which is required when sampling with `fps`. "
                 "Please pass in `VideoMetadata` object or use a fixed `num_frames` per input video"
             )
-        max_frames = math.floor(min(max_frames, total_num_frames) / frame_factor) * frame_factor
+        # max_frames = math.floor(min(max_frames, total_num_frames) / frame_factor) * frame_factor
+        min_frames = ceil_by_factor(min_frames, frame_factor)
+        max_frames = floor_by_factor(min(max_frames, total_num_frames), frame_factor)
+
         num_frames = total_num_frames / metadata["fps"] * fps
+
+        if num_frames > total_num_frames:
+            data_processor_logger.warning(f"smart_nframes: nframes[{num_frames}] > total_frames[{total_num_frames}]")
+
         num_frames = min(min(max(num_frames, min_frames), max_frames), total_num_frames)
-        num_frames = math.floor(num_frames / frame_factor) * frame_factor
+        num_frames = floor_by_factor(num_frames, frame_factor)
 
     if num_frames > total_num_frames:
         raise ValueError(
@@ -117,15 +82,19 @@ def sample_frames(
             "Decrease `num_frames` or `fps` for sampling."
         )
 
+    # Hack code ensures that num_frames can always be divided by 4
+    # due to sched/resource_manager_v1.py 中 grid_thw.extend([[2, h, w]] * (t // 2))
+    if num_frames > 2 and num_frames % 4 != 0:
+        num_frames = (num_frames // 4) * 4  # 向下取整到 4 的倍数
+        total_num_frames = (total_num_frames // 4) * 4
+        num_frames = min(min(max(num_frames, min_frames), max_frames), total_num_frames)
+
     # Calculate frame indices based on sampling strategy
-    if num_frames is not None:
+    if num_frames > 0:
         # Evenly spaced sampling for target frame count
         indices = np.arange(0, total_num_frames, total_num_frames / num_frames).astype(np.int32)
     else:
         # Keep all frames if no sampling requested
         indices = np.arange(0, total_num_frames).astype(np.int32)
 
-    # Apply frame selection
-    video = video[indices]
-
-    return video
+    return indices

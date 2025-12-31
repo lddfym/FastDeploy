@@ -1,3 +1,5 @@
+[简体中文](../zh/features/structured_outputs.md)
+
 # Structured Outputs
 
 ## Overview
@@ -5,6 +7,7 @@
 Structured Outputs refer to predefined format constraints that force large language models to generate content strictly following specified structures. This feature significantly improves output controllability and is suitable for scenarios requiring precise format outputs (such as API calls, data parsing, code generation, etc.), while supporting dynamic grammar extensions to balance flexibility and standardization.
 
 FastDeploy supports using the [XGrammar](https://xgrammar.mlc.ai/docs/) backend to generate structured outputs.
+FastDeploy supports using the [LLguidance](https://github.com/guidance-ai/llguidance) backend to generate structured outputs.
 
 Supported output formats:
 

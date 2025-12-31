@@ -24,124 +24,325 @@ namespace api {
 namespace plugin {
 
 template <typename T>
-DLL_EXPORT int set_stop_value_multi_ends(Context *ctx, bool *stop_flags,
-                                         T *topk_ids, T *next_tokens,
-                                         const T *end_ids, const int *seq_lens,
-                                         const int bs, const int end_length,
+DLL_EXPORT int set_stop_value_multi_ends(Context* ctx,
+                                         bool* stop_flags,
+                                         T* topk_ids,
+                                         T* next_tokens,
+                                         const T* end_ids,
+                                         const int* seq_lens,
+                                         const int bs,
+                                         const int end_length,
                                          const bool beam_search);
 
-DLL_EXPORT int set_value_by_flags_and_idx(Context *ctx, const bool *stop_flags,
-                                          int64_t *pre_ids_all,
-                                          const int64_t *input_ids,
-                                          const int *seq_lens_encoder,
-                                          const int *seq_lens_decoder,
-                                          const int64_t *step_idx, int bs,
-                                          int length, int length_input_ids);
+DLL_EXPORT int set_value_by_flags_and_idx(Context* ctx,
+                                          const bool* stop_flags,
+                                          int64_t* pre_ids_all,
+                                          const int64_t* input_ids,
+                                          const int* seq_lens_encoder,
+                                          const int* seq_lens_decoder,
+                                          const int64_t* step_idx,
+                                          int bs,
+                                          int length,
+                                          int length_input_ids);
 
 template <typename T>
-DLL_EXPORT int token_penalty_multi_scores(
-    Context *ctx, const int64_t *pre_ids, T *logits, const T *penalty_scores,
-    const T *frequency_scores, const T *presence_scores,
-    const float *temperatures, const int64_t *cur_len, const int64_t *min_len,
-    const int64_t *eos_token_id, const int64_t *bad_words, const int64_t bs,
-    const int64_t length, const int64_t length_id, const int64_t end_length,
-    const int64_t length_bad_words);
+DLL_EXPORT int token_penalty_multi_scores(Context* ctx,
+                                          const int64_t* pre_ids,
+                                          T* logits,
+                                          const T* penalty_scores,
+                                          const T* frequency_scores,
+                                          const T* presence_scores,
+                                          const float* temperatures,
+                                          const int64_t* cur_len,
+                                          const int64_t* min_len,
+                                          const int64_t* eos_token_id,
+                                          const int64_t* bad_words,
+                                          const int64_t bs,
+                                          const int64_t length,
+                                          const int64_t length_id,
+                                          const int64_t end_length,
+                                          const int64_t length_bad_words);
 
-DLL_EXPORT int get_padding_offset(Context *ctx, int *padding_offset,
-                                  int *cum_offsets_out, int *cu_seqlens_q,
-                                  int *cu_seqlens_k, int64_t *x_remove_padding,
-                                  const int64_t *input_ids,
-                                  const int *cum_offsets, const int *seq_lens,
-                                  const int max_seq_len, const int bs);
+DLL_EXPORT int get_padding_offset(Context* ctx,
+                                  int* padding_offset,
+                                  int* cum_offsets_out,
+                                  int* cu_seqlens_q,
+                                  int* cu_seqlens_k,
+                                  int64_t* x_remove_padding,
+                                  const int64_t* input_ids,
+                                  const int* cum_offsets,
+                                  const int* seq_lens,
+                                  const int max_seq_len,
+                                  const int bs);
 
-DLL_EXPORT int update_inputs(Context *ctx, bool *not_need_stop,
-                             int *seq_lens_this_time, int *seq_lens_encoder,
-                             int *seq_lens_decoder, int64_t *input_ids,
-                             const int64_t *stop_nums, const bool *stop_flags,
-                             const bool *is_block_step,
-                             const int64_t *next_tokens, const int bsz,
-                             const int max_bsz, const int input_ids_stride);
+DLL_EXPORT int speculate_get_padding_offset(Context* ctx,
+                                            int* batch_id_per_token,
+                                            int* cum_offsets_out,
+                                            int* cu_seqlens_q,
+                                            int* cu_seqlens_k,
+                                            const int* cum_offsets,
+                                            const int* seq_lens,
+                                            const int max_seq_len,
+                                            int bsz);
 
-DLL_EXPORT int free_and_dispatch_block(
-    Context *ctx, bool *stop_flags, int *seq_lens_this_time,
-    int *seq_lens_decoder, int *block_tables, int *encoder_block_lens,
-    bool *is_block_step,
-    int *step_block_list, // [bsz]
-    int *step_len, int *recover_block_list, int *recover_len,
-    int *need_block_list, int *need_block_len, int *used_list_len,
-    int *free_list, int *free_list_len, int64_t *first_token_ids, const int bsz,
-    const int block_size, const int block_num_per_seq,
-    const int max_decoder_block_num);
+DLL_EXPORT int draft_model_preprocess(api::Context* ctx,
+                                      int64_t* draft_tokens,
+                                      int64_t* input_ids,
+                                      bool* stop_flags,
+                                      int* seq_lens_this_time,
+                                      int* seq_lens_encoder,
+                                      int* seq_lens_decoder,
+                                      int64_t* step_idx,
+                                      bool* not_need_stop,
+                                      bool* is_block_step,
+                                      bool* batch_drop,
+                                      int64_t* pre_ids,
+                                      const int64_t* accept_tokens,
+                                      const int* accept_num,
+                                      const int* base_model_seq_lens_this_time,
+                                      const int* base_model_seq_lens_encoder,
+                                      const int* base_model_seq_lens_decoder,
+                                      const int64_t* base_model_step_idx,
+                                      const bool* base_model_stop_flags,
+                                      const bool* base_model_is_block_step,
+                                      int64_t* base_model_draft_tokens,
+                                      const int bsz,
+                                      const int num_model_step,
+                                      const int accept_tokens_len,
+                                      const int draft_tokens_len,
+                                      const int input_ids_len,
+                                      const int base_model_draft_tokens_len,
+                                      const int pre_ids_len,
+                                      const bool truncate_first_token,
+                                      const bool splitwise_prefill,
+                                      const bool kvcache_scheduler_v1);
 
-DLL_EXPORT int
-recover_block(Context *ctx,
-              int *recover_block_list, // [bsz]
-              int *recover_len, bool *stop_flags, int *seq_lens_this_time,
-              const int *ori_seq_lens_encoder, int *seq_lens_encoder,
-              const int *seq_lens_decoder, int *block_tables, int *free_list,
-              int *free_list_len, int64_t *input_ids, const int64_t *pre_ids,
-              const int64_t *step_idx, const int *encoder_block_lens,
-              const int *used_list_len, const int64_t *next_tokens,
-              const int64_t *first_token_ids, const int bsz,
-              const int block_num_per_seq, const int length,
-              const int pre_id_length);
+DLL_EXPORT int update_inputs(Context* ctx,
+                             bool* not_need_stop,
+                             int* seq_lens_this_time,
+                             int* seq_lens_encoder,
+                             int* seq_lens_decoder,
+                             int64_t* input_ids,
+                             const int64_t* stop_nums,
+                             const bool* stop_flags,
+                             const bool* is_block_step,
+                             const int64_t* next_tokens,
+                             const int bsz,
+                             const int max_bsz,
+                             const int input_ids_stride);
 
+DLL_EXPORT int free_and_dispatch_block(Context* ctx,
+                                       bool* stop_flags,
+                                       int* seq_lens_this_time,
+                                       int* seq_lens_decoder,
+                                       int* block_tables,
+                                       int* encoder_block_lens,
+                                       bool* is_block_step,
+                                       int* step_block_list,  // [bsz]
+                                       int* step_len,
+                                       int* recover_block_list,
+                                       int* recover_len,
+                                       int* need_block_list,
+                                       int* need_block_len,
+                                       int* used_list_len,
+                                       int* free_list,
+                                       int* free_list_len,
+                                       int64_t* first_token_ids,
+                                       const int bsz,
+                                       const int block_size,
+                                       const int block_num_per_seq,
+                                       const int max_decoder_block_num);
 
-DLL_EXPORT int
-recover_decode_task(Context *ctx, bool *stop_flags,
-                                   int *seq_lens_this_time,
-                                   int *seq_lens_encoder,
-                                   int *seq_lens_decoder,
-                                   int *step_seq_lens_decoder,
-                                   int *block_tables,
-                                   bool *is_block_step,
+DLL_EXPORT int speculate_free_and_dispatch_block(
+    Context* ctx,
+    bool* stop_flags,
+    int* seq_lens_this_time,
+    int* seq_lens_decoder,
+    int* block_tables,
+    int* encoder_block_lens,
+    bool* is_block_step,
+    int* step_block_list,  // [bsz]
+    int* step_len,
+    int* recover_block_list,
+    int* recover_len,
+    int* need_block_list,
+    int* need_block_len,
+    int* used_list_len,
+    int* free_list,
+    int* free_list_len,
+    int64_t* first_token_ids,
+    int* accept_num,
+    const int bsz,
+    const int block_size,
+    const int block_num_per_seq,
+    const int max_decoder_block_num,
+    const int max_draft_tokens);
+
+DLL_EXPORT int recover_block(Context* ctx,
+                             int* recover_block_list,  // [bsz]
+                             int* recover_len,
+                             bool* stop_flags,
+                             int* seq_lens_this_time,
+                             const int* ori_seq_lens_encoder,
+                             int* seq_lens_encoder,
+                             const int* seq_lens_decoder,
+                             int* block_tables,
+                             int* free_list,
+                             int* free_list_len,
+                             int64_t* input_ids,
+                             const int64_t* pre_ids,
+                             const int64_t* step_idx,
+                             const int* encoder_block_lens,
+                             const int* used_list_len,
+                             const int64_t* next_tokens,
+                             const int64_t* first_token_ids,
+                             const int bsz,
+                             const int block_num_per_seq,
+                             const int length,
+                             const int pre_id_length);
+
+DLL_EXPORT int speculate_recover_block(Context* ctx,
+                                       int* recover_block_list,  // [bsz]
+                                       int* recover_len,
+                                       bool* stop_flags,
+                                       int* seq_lens_this_time,
+                                       const int* ori_seq_lens_encoder,
+                                       const int* ori_seq_lens_decoder,
+                                       int* seq_lens_encoder,
+                                       int* seq_lens_decoder,
+                                       int* block_tables,
+                                       int* free_list,
+                                       int* free_list_len,
+                                       int64_t* input_ids,
+                                       const int64_t* pre_ids,
+                                       const int64_t* step_idx,
+                                       const int* encoder_block_lens,
+                                       const int* used_list_len,
+                                       const int64_t* next_tokens,
+                                       const int64_t* first_token_ids,
+                                       const int bsz,
+                                       const int block_num_per_seq,
+                                       const int length,
+                                       const int pre_id_length);
+
+DLL_EXPORT int recover_decode_task(Context* ctx,
+                                   bool* stop_flags,
+                                   int* seq_lens_this_time,
+                                   int* seq_lens_encoder,
+                                   int* seq_lens_decoder,
+                                   int* step_seq_lens_decoder,
+                                   int* block_tables,
+                                   bool* is_block_step,
                                    const int bsz,
                                    const int block_num_per_seq,
                                    const int block_size);
 
-DLL_EXPORT int
-update_inputs_v1(Context *ctx, bool *not_need_stop,
-                                     int *seq_lens_this_time,
-                                     int *seq_lens_encoder,
-                                     int *seq_lens_decoder,
-                                     int *step_seq_lens_decoder,
-                                     int64_t *prompt_lens,
-                                     int64_t *topk_ids,
-                                     int64_t *input_ids,
-                                     int *block_tables,
-                                     const int64_t *stop_nums,
-                                     bool *stop_flags,
-                                     bool *is_block_step,
-                                     const int64_t *next_tokens,
-                                     const int bsz,
-                                     const int max_bsz,
-                                     const int input_ids_stride,
-                                     const int block_num_per_seq,
-                                     const int block_size);
+DLL_EXPORT int update_inputs_v1(Context* ctx,
+                                bool* not_need_stop,
+                                int* seq_lens_this_time,
+                                int* seq_lens_encoder,
+                                int* seq_lens_decoder,
+                                int* step_seq_lens_decoder,
+                                int64_t* prompt_lens,
+                                int64_t* topk_ids,
+                                int64_t* input_ids,
+                                int* block_tables,
+                                const int64_t* stop_nums,
+                                bool* stop_flags,
+                                bool* is_block_step,
+                                const int64_t* next_tokens,
+                                const int bsz,
+                                const int max_bsz,
+                                const int input_ids_stride,
+                                const int block_num_per_seq,
+                                const int block_size);
 
 template <typename TX, typename TY>
-DLL_EXPORT int
-eb_adjust_batch(Context *ctx, const TX *x, TY *y,
-                VectorParam<int32_t> &encoder_seqs_lods, // NOLINT
-                VectorParam<int32_t> &encoder_batch_map, // NOLINT
-                VectorParam<int32_t> &decoder_batch_map, // NOLINT
-                int64_t hidden_dim);
+DLL_EXPORT int eb_adjust_batch(
+    Context* ctx,
+    const TX* x,
+    TY* y,
+    VectorParam<int32_t>& encoder_seqs_lods,  // NOLINT
+    VectorParam<int32_t>& decoder_seqs_lods,  // NOLINT
+    VectorParam<int32_t>& encoder_batch_map,  // NOLINT
+    VectorParam<int32_t>& decoder_batch_map,  // NOLINT
+    int64_t hidden_dim);
 
 template <typename TX, typename TY>
-DLL_EXPORT int
-eb_gather_next_token(Context *ctx, const TX *x, TY *y,
-                     VectorParam<int32_t> &encoder_seqs_lods, // NOLINT
-                     VectorParam<int32_t> &encoder_batch_map, // NOLINT
-                     VectorParam<int32_t> &decoder_batch_map, // NOLINT
-                     int64_t hidden_dim);
+DLL_EXPORT int eb_gather_next_token(
+    Context* ctx,
+    const TX* x,
+    TY* y,
+    VectorParam<int32_t>& encoder_seqs_lods,  // NOLINT
+    VectorParam<int32_t>& encoder_batch_map,  // NOLINT
+    VectorParam<int32_t>& decoder_batch_map,  // NOLINT
+    int64_t hidden_dim);
+
+template <typename TX, typename TY>
+DLL_EXPORT int eb_mtp_gather_next_token(
+    Context* ctx,
+    const TX* x,
+    TY* y,
+    VectorParam<int32_t>& encoder_seqs_lods,  // NOLINT
+    VectorParam<int32_t>& decoder_seqs_lods,  // NOLINT
+    VectorParam<int32_t>& encoder_batch_map,  // NOLINT
+    VectorParam<int32_t>& decoder_batch_map,  // NOLINT
+    int64_t hidden_dim);
 
 template <typename TX, typename TSCALE = float, typename TY = int8_t>
-DLL_EXPORT int quant2d_per_channel(api::Context *ctx, const TX *x,
-                                   const TSCALE *scale_in, TY *y,
-                                   TSCALE *scale_out, int64_t m, int64_t n);
+DLL_EXPORT int quant2d_per_channel(api::Context* ctx,
+                                   const TX* x,
+                                   const TSCALE* scale_in,
+                                   TY* y,
+                                   TSCALE* scale_out,
+                                   int64_t m,
+                                   int64_t n);
 
+DLL_EXPORT int text_image_index_out(Context* ctx,
+                                    const int* token_type_ids,  // x
+                                    int* text_index,            // y1
+                                    int* image_index,           // y2
+                                    const int64_t token_num);
 
-/*--------------------------------------- MTP being --------------------------------------------*/
+template <typename T>
+DLL_EXPORT int text_image_gather_scatter(api::Context* ctx,
+                                         T* input,
+                                         T* text_input,
+                                         T* image_input,
+                                         int* token_type_ids,
+                                         int* text_index,
+                                         int* image_index,
+                                         int64_t token_num,
+                                         int64_t text_token_num,
+                                         int64_t image_token_num,
+                                         int64_t hidden_size,
+                                         bool is_scatter);
+
+DLL_EXPORT int limit_thinking_content_length_kernel_v1(
+    api::Context* ctx,
+    int64_t* next_tokens,
+    const int* max_think_lens,
+    const int64_t* step_idx,
+    const int64_t* eos_token_ids,
+    int* limit_think_status,
+    bool* stop_flags,
+    const int64_t think_end_id,
+    const int bs,
+    const int eos_token_id_len);
+
+DLL_EXPORT int limit_thinking_content_length_kernel_v2(
+    api::Context* ctx,
+    int64_t* next_tokens,
+    const int* max_think_lens,
+    const int64_t* step_idx,
+    int* limit_think_status,
+    const bool* stop_flags,
+    const int64_t think_end_id,
+    const int64_t line_break_id,
+    const int bs);
+
+/*--------------------------------------- MTP being
+ * --------------------------------------------*/
 
 template <typename T>
 DLL_EXPORT int speculate_token_penalty_multi_scores(
@@ -181,9 +382,9 @@ DLL_EXPORT int mtp_free_and_dispatch_block(Context* ctx,
                                            const int block_num_per_seq,
                                            const int max_draft_tokens);
 
-
 template <bool ENABLE_TOPP, bool USE_TOPK>
 DLL_EXPORT int speculate_verify(Context* ctx,
+                                const int64_t* sampled_token_ids,
                                 int64_t* accept_tokens,
                                 int* accept_num,
                                 int64_t* step_idx,
@@ -208,7 +409,10 @@ DLL_EXPORT int speculate_verify(Context* ctx,
                                 const int max_seq_len,
                                 const int max_candidate_len,
                                 const int verify_window,
-                                const bool prefill_one_step_stop);
+                                const bool prefill_one_step_stop,
+                                const bool benchmark_mode,
+                                const bool accept_all_drafts,
+                                const bool use_target_sampling);
 
 DLL_EXPORT int speculate_clear_accept_nums(Context* ctx,
                                            int* accept_num,
@@ -244,35 +448,6 @@ DLL_EXPORT int draft_model_update(Context* ctx,
                                   const int max_seq_len,
                                   const int substep,
                                   const bool prefill_one_step_stop);
-
-DLL_EXPORT int draft_model_preprocess(api::Context* ctx,
-                                      int64_t* draft_tokens,
-                                      int64_t* input_ids,
-                                      bool* stop_flags,
-                                      int* seq_lens_this_time,
-                                      int* seq_lens_encoder,
-                                      int* seq_lens_decoder,
-                                      int64_t* step_idx,
-                                      int* seq_lens_encoder_record,
-                                      int* seq_lens_decoder_record,
-                                      bool* not_need_stop,
-                                      bool* batch_drop,
-                                      const int64_t* accept_tokens,
-                                      const int* accept_num,
-                                      const int* base_model_seq_lens_encoder,
-                                      const int* base_model_seq_lens_decoder,
-                                      const int64_t* base_model_step_idx,
-                                      const bool* base_model_stop_flags,
-                                      const bool* base_model_is_block_step,
-                                      int64_t* base_model_draft_tokens,
-                                      int real_bsz,
-                                      int max_draft_token,
-                                      int accept_tokens_len,
-                                      int draft_tokens_len,
-                                      int input_ids_len,
-                                      int base_model_draft_tokens_len,
-                                      bool truncate_first_token,
-                                      bool splitwise_prefill);
 
 DLL_EXPORT int speculate_set_stop_value_multi_seqs(Context* ctx,
                                                    bool* stop_flags,
@@ -313,16 +488,6 @@ DLL_EXPORT int speculate_remove_padding(Context* ctx,
                                         int max_draft_tokens,
                                         int bsz,
                                         int token_num_data);
-
-DLL_EXPORT int speculate_get_padding_offset(Context* ctx,
-                                            int* padding_offset,
-                                            int* cum_offsets_out,
-                                            int* cu_seqlens_q,
-                                            int* cu_seqlens_k,
-                                            const int* cum_offsets,
-                                            const int* seq_lens,
-                                            const int max_seq_len,
-                                            int bsz);
 
 DLL_EXPORT int compute_self_order(api::Context* ctx,
                                   const int* last_seq_lens_this_time,
@@ -438,9 +603,23 @@ DLL_EXPORT int rebuild_self_hidden_states(api::Context* ctx,
                                           T* output,
                                           int dim_embed,
                                           int elem_cnt);
-/*--------------------------------------- MTP end --------------------------------------------*/
 
-} // namespace plugin
-} // namespace api
-} // namespace xpu
-} // namespace baidu
+DLL_EXPORT int speculate_get_logits(Context* ctx,
+                                    float* draft_logits,
+                                    int* next_token_num,
+                                    int* batch_token_num,
+                                    int* cu_next_token_offset,
+                                    int* cu_batch_token_offset,
+                                    const float* logits,
+                                    const float* first_token_logits,
+                                    const int* seq_lens_this_time,
+                                    const int* seq_lens_encoder,
+                                    const int real_bsz,
+                                    const int vocab_size);
+/*--------------------------------------- MTP end
+ * --------------------------------------------*/
+
+}  // namespace plugin
+}  // namespace api
+}  // namespace xpu
+}  // namespace baidu

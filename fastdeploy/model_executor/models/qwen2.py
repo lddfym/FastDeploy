@@ -44,6 +44,12 @@ from fastdeploy.model_executor.models.model_base import (
     ModelForCasualLM,
     ModelRegistry,
 )
+from fastdeploy.model_executor.utils import (
+    WeightsMapper,
+    default_weight_loader,
+    process_weights_after_loading,
+    process_weights_before_loading,
+)
 
 
 class Qwen2MLP(nn.Layer):
@@ -55,7 +61,6 @@ class Qwen2MLP(nn.Layer):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.nranks = fd_config.parallel_config.tensor_parallel_size
         self.up_gate_proj = MergedColumnParallelLinear(
             fd_config=fd_config,
             prefix=f"{prefix}.up_gate_proj",
@@ -84,7 +89,7 @@ class Qwen2MLP(nn.Layer):
         self.up_gate_proj.load_state_dict(state_dict)
         self.down_proj.load_state_dict(state_dict)
 
-    def forward(self, x):
+    def forward(self, x, forward_meta):
         """ """
         gate_up_out = self.up_gate_proj(x)
         act_out = self.act_fn(gate_up_out)
@@ -170,6 +175,7 @@ class Qwen2DecoderLayer(nn.Layer):
             hidden_size=fd_config.model_config.hidden_size,
             eps=fd_config.model_config.rms_norm_eps,
             prefix=f"{prefix}.post_attention_layernorm",
+            layer_id=layer_id,
         )
 
     def load_state_dict(self, state_dict):
@@ -187,11 +193,9 @@ class Qwen2DecoderLayer(nn.Layer):
     ):
         """ """
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = self.input_layernorm(
+            hidden_states, residual_input=residual, forward_meta=forward_meta
+        )
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
@@ -201,7 +205,7 @@ class Qwen2DecoderLayer(nn.Layer):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, forward_meta)
 
         return hidden_states, residual
 
@@ -272,23 +276,21 @@ class Qwen2Model(nn.Layer):
     ):
         """ """
 
-        hidden_states = self.embed_tokens(ids_remove_padding=ids_remove_padding)
+        hidden_states = self.embed_tokens(ids_remove_padding=ids_remove_padding, forward_meta=forward_meta)
 
         residual = None
 
         for i in range(self.num_layers):
             hidden_states, residual = self.layers[i](forward_meta, hidden_states, residual)
 
-        hidden_states = hidden_states + residual
-
-        out = self.norm(hidden_states)
+        out = self.norm(hidden_states, residual)[0]
 
         return out
 
 
 @ModelRegistry.register_model_class(
     architecture="Qwen2ForCausalLM",
-    module_path="qwen2",
+    module_name="qwen2",
     category=[ModelCategory.TEXT_GENERATION, ModelCategory.EMBEDDING],
     primary_use=ModelCategory.TEXT_GENERATION,
 )
@@ -308,12 +310,20 @@ class Qwen2ForCausalLM(ModelForCasualLM):
         self.qwen2 = Qwen2Model(fd_config=fd_config)
 
         self.ori_vocab_size = fd_config.model_config.ori_vocab_size
-
+        self.tie_word_embeddings = fd_config.model_config.tie_word_embeddings
         self.lm_head = ParallelLMHead(
             fd_config=fd_config,
             embedding_dim=fd_config.model_config.hidden_size,
             num_embeddings=fd_config.model_config.vocab_size,
             prefix="lm_head",
+        )
+
+        self.process_weights_before_loading_fn = process_weights_before_loading(
+            mapper=(
+                WeightsMapper(orig_to_new_prefix={"model.": "qwen2."})
+                if self.fd_config.model_config.model_format == "torch"
+                else None
+            ),
         )
 
     @paddle.no_grad()
@@ -324,11 +334,6 @@ class Qwen2ForCausalLM(ModelForCasualLM):
         Args:
             weights_iterator (Iterator): An iterator yielding (name, weight) pairs.
         """
-
-        from fastdeploy.model_executor.utils import (
-            default_weight_loader,
-            process_weights_after_loading,
-        )
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -342,12 +347,15 @@ class Qwen2ForCausalLM(ModelForCasualLM):
         ]
 
         params_dict = dict(self.named_parameters())
-        process_weights_after_loading_fn = process_weights_after_loading(dict(self.named_sublayers()))
+        process_weights_after_loading_fn = process_weights_after_loading(dict(self.named_sublayers()), self.fd_config)
         for loaded_weight_name, loaded_weight in weights_iterator:
-            model_format = self.fd_config.model_config.model_format
-            # Because the prefix for Paddle is qwen2, and for Hugging Face it is model.
-            if model_format == "torch":
-                loaded_weight_name = loaded_weight_name.replace("model", "qwen2")
+            loaded_weight_name = (
+                self.process_weights_before_loading_fn(loaded_weight_name)
+                if getattr(self, "process_weights_before_loading_fn", None)
+                else loaded_weight_name
+            )
+            if loaded_weight_name is None:
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in loaded_weight_name:
                     continue
@@ -367,6 +375,10 @@ class Qwen2ForCausalLM(ModelForCasualLM):
                 weight_loader(param, loaded_weight)
             model_sublayer_name = re.sub(r"\.(weight)$", "", model_param_name)
             process_weights_after_loading_fn(model_sublayer_name, param)
+        if getattr(self, "tie_word_embeddings", False):
+            self.lm_head.linear.weight.set_value(
+                self.qwen2.embed_tokens.embeddings.weight.transpose([1, 0]).astype(self.lm_head.linear.weight.dtype)
+            )
 
     @classmethod
     def name(self):
@@ -433,7 +445,7 @@ class Qwen2PretrainedModel(PretrainedModel):
 
         fn = split_or_merge_func(
             is_split=is_split,
-            tensor_parallel_degree=config.tensor_parallel_degree,
+            tensor_model_parallel_size=config.tensor_model_parallel_size,
             tensor_parallel_rank=config.tensor_parallel_rank,
             num_attention_heads=config.num_attention_heads,
         )
@@ -456,7 +468,7 @@ class Qwen2PretrainedModel(PretrainedModel):
                 base_actions["layers.0.self_attn.q_proj.weight"] = partial(fn, is_column=True)
                 base_actions["layers.0.self_attn.q_proj.bias"] = partial(fn, is_column=True)
                 # if we have enough num_key_value_heads to split, then split it.
-                if config.num_key_value_heads % config.tensor_parallel_degree == 0:
+                if config.num_key_value_heads % config.tensor_model_parallel_size == 0:
                     base_actions["layers.0.self_attn.k_proj.weight"] = partial(fn, is_column=True)
                     base_actions["layers.0.self_attn.v_proj.weight"] = partial(fn, is_column=True)
                     base_actions["layers.0.self_attn.k_proj.bias"] = partial(fn, is_column=True)

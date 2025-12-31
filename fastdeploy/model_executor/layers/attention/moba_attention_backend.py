@@ -75,8 +75,8 @@ class PlasAttentionBackend(AttentionBackend):
         super().__init__()
         self.attention_metadata: PlasAttentionMetadata = None
         assert fd_config.plas_attention_config is not None, "plas_attention_config is None"
-        self.block_size = fd_config.parallel_config.block_size
-        self.max_seq_len = fd_config.parallel_config.max_model_len
+        self.block_size = fd_config.cache_config.block_size
+        self.max_seq_len = fd_config.model_config.max_model_len
         self.max_num_seqs = fd_config.scheduler_config.max_num_seqs
         self.kv_num_heads = kv_num_heads
         self.num_heads = num_heads
@@ -126,20 +126,22 @@ class PlasAttentionBackend(AttentionBackend):
         """
         Calculate kv cache shape
         """
+        key_cache_shape = [max_num_blocks, self.kv_num_heads, self.block_size, self.head_dim]
+        value_cache_shape = [max_num_blocks, self.kv_num_heads, self.block_size, self.head_dim]
         if kv_cache_quant_type is not None and kv_cache_quant_type == "int4_zp":
-            return (
+            key_cache_shape = [
                 max_num_blocks,
                 self.kv_num_heads,
                 self.block_size,
                 self.head_dim // 2,
-            )
-        else:
-            return (
+            ]
+            value_cache_shape = [
                 max_num_blocks,
                 self.kv_num_heads,
                 self.block_size,
-                self.head_dim,
-            )
+                self.head_dim // 2,
+            ]
+        return key_cache_shape, value_cache_shape
 
     def forward_mixed(
         self,

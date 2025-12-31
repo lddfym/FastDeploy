@@ -20,6 +20,7 @@ from typing import Optional
 
 import paddle
 from paddle.nn.quant import weight_quantize
+from paddleformers.utils.log import logger
 
 from fastdeploy import envs
 from fastdeploy.model_executor.layers.linear import (
@@ -27,7 +28,12 @@ from fastdeploy.model_executor.layers.linear import (
     MergedReplicatedLinear,
     QKVParallelLinear,
 )
-from fastdeploy.model_executor.utils import TensorTracker, free_tensor, set_weight_attrs
+from fastdeploy.model_executor.utils import (
+    TensorTracker,
+    free_tensor,
+    process_weight_transpose,
+    set_weight_attrs,
+)
 from fastdeploy.platforms import current_platform
 
 if current_platform.is_xpu():
@@ -37,9 +43,21 @@ if current_platform.is_xpu():
 else:
     from paddle.nn.quant import weight_only_linear
 
+from fastdeploy.model_executor.layers.quantization.ops.machete_mm import (
+    _ENABLE_MACHETE,
+    check_machete_supports_shape,
+    query_machete_supported_group_size,
+)
+
 from ..moe import FusedMoE
 from ..utils import get_tensor
 from .quant_base import QuantConfigBase, QuantMethodBase
+
+if _ENABLE_MACHETE:
+    from fastdeploy.model_executor.layers.quantization.ops import (
+        machete_quantize_and_pack,
+        machete_wint_mm,
+    )
 
 
 class WeightOnlyConfig(QuantConfigBase):
@@ -65,6 +83,7 @@ class WeightOnlyConfig(QuantConfigBase):
         self.quant_min_bound = 0
         self.quant_round_type = 0
         self.is_checkpoint_bf16 = is_checkpoint_bf16
+        self.group_size = -1
 
     def name(self) -> str:
         return "weight_only"
@@ -78,18 +97,11 @@ class WeightOnlyConfig(QuantConfigBase):
     def get_quant_method(self, layer) -> Optional[QuantMethodBase]:
         if current_platform.is_xpu():
             if isinstance(layer, FusedMoE):
-                if layer.ep_size > 1:
-                    from fastdeploy.model_executor.layers.backends import (
-                        XPUWeightOnlyMoeEpMethod,
-                    )
+                from fastdeploy.model_executor.layers.backends import (
+                    XPUWeightOnlyMoEMethod,
+                )
 
-                    return XPUWeightOnlyMoeEpMethod(self)
-                else:
-                    from fastdeploy.model_executor.layers.backends import (
-                        XPUWeightOnlyMoEMethod,
-                    )
-
-                    return XPUWeightOnlyMoEMethod(self)
+                return XPUWeightOnlyMoEMethod(self, layer)
             else:
                 from fastdeploy.model_executor.layers.backends import (
                     XPUWeightOnlyLinearMethod,
@@ -122,10 +134,18 @@ class WeightOnlyConfig(QuantConfigBase):
         elif current_platform.is_maca():
             if isinstance(layer, FusedMoE):
                 from fastdeploy.model_executor.layers.backends import (
+                    MetaxCutlassWeightOnlyMoEMethod,
                     MetaxTritonWeightOnlyMoEMethod,
                 )
 
-                return MetaxTritonWeightOnlyMoEMethod(self)
+                if layer.use_method == "cutlass":
+
+                    return MetaxCutlassWeightOnlyMoEMethod(self)
+                elif layer.use_method == "triton":
+
+                    return MetaxTritonWeightOnlyMoEMethod(self)
+                else:
+                    raise ValueError(f"Unsupported MOE backend {layer.use_method}")
             else:
 
                 return GPUWeightOnlyLinearMethod(self)
@@ -152,16 +172,15 @@ class WeightOnlyConfig(QuantConfigBase):
                 else:
                     raise ValueError(f"Unsupported MOE backend {layer.use_method}")
             else:
-                from fastdeploy.model_executor.layers.quantization.ops.machete_mm import (
-                    _ENABLE_MACHETE,
-                )
-
                 if (
                     _ENABLE_MACHETE
                     and envs.FD_USE_MACHETE == "1"
-                    and layer.weight_shape[1]
-                    and layer.weight_shape[1] % 128 == 0
+                    and not layer.is_quantized
+                    and not layer.fd_config.load_config.dynamic_load_weight
+                    and check_machete_supports_shape(layer.weight_shape[0], layer.weight_shape[1])
                 ):
+                    self.group_size = query_machete_supported_group_size(layer.weight_shape[0])
+                    logger.info(f"Using Machete kernel for WeightOnlyLinearMethod, group size: {self.group_size}")
                     return MacheteWeightOnlyLinearMethod(self)
                 return GPUWeightOnlyLinearMethod(self)
 
@@ -217,34 +236,41 @@ class WeightOnlyLinearMethod(QuantMethodBase):
 
     def create_weights(self, layer, **extra_weight_attrs):
         # TODO(bukejiyu): remove v1 loader check when v0 loader is removed
+        self.model_format = extra_weight_attrs.get("model_format")
         if self.quant_config.is_checkpoint_bf16 and layer.fd_config.load_config.load_choices == "default_v1":
+            weight_shape = layer.weight_shape[::-1] if self.model_format == "torch" else layer.weight_shape
             layer.weight = layer.create_parameter(
-                shape=layer.weight_shape,
+                shape=weight_shape,
                 dtype=layer.weight_dtype,
                 is_bias=False,
                 default_initializer=paddle.nn.initializer.Constant(0),
             )
-            extra_weight_attrs["weight_need_transpose"] = extra_weight_attrs.get("model_format") == "torch"
+
             quant_attrs = extra_weight_attrs
+
             if (
                 isinstance(layer, MergedColumnParallelLinear)
                 or isinstance(layer, QKVParallelLinear)
                 or isinstance(layer, MergedReplicatedLinear)
             ):
+                # Only MergedReplicatedLinear uses the default outdim.
+                tensor_output_dim = (self.model_format == "torch") ^ quant_attrs.get("output_dim", True)
                 quant_attrs = {
-                    **extra_weight_attrs,
-                    "tensor_track": TensorTracker(
-                        shape=layer.weight_shape, output_dim=extra_weight_attrs.get("output_dim", True)
-                    ),
+                    **quant_attrs,
+                    "tensor_track": TensorTracker(shape=weight_shape, output_dim=tensor_output_dim),
                 }
+
+            if self.model_format == "torch" and "output_dim" in quant_attrs:
+                quant_attrs["output_dim"] = not quant_attrs["output_dim"]
+
             set_weight_attrs(
                 layer.weight,
                 quant_attrs,
             )
         else:
             if isinstance(self, MacheteWeightOnlyLinearMethod):
-                # Using group scale for machete, group size is 128
-                weight_scale_shape = [(layer.weight_shape[0] + 127) // 128, layer.weight_shape[1]]
+                # Using group scale for machete
+                weight_scale_shape = [layer.weight_shape[0] // self.quant_config.group_size, layer.weight_shape[1]]
                 if self.quant_config.name() == "wint4":
                     layer.weight_shape[0] //= 8
                 else:
@@ -265,16 +291,11 @@ class WeightOnlyLinearMethod(QuantMethodBase):
                 default_initializer=paddle.nn.initializer.Constant(0),
             )
 
-            output_dim = extra_weight_attrs.get("output_dim")
-            output_dim = not output_dim
-            weight_loader = extra_weight_attrs.get("weight_loader")
+            if "output_dim" in extra_weight_attrs:
+                extra_weight_attrs["output_dim"] = not extra_weight_attrs["output_dim"]
             set_weight_attrs(
                 layer.weight,
-                {
-                    "weight_loader": weight_loader,
-                    "output_dim": output_dim,
-                    "weight_need_transpose": not extra_weight_attrs.get("model_format") == "torch",
-                },
+                extra_weight_attrs,
             )
 
             layer.weight_scale = layer.create_parameter(
@@ -285,50 +306,52 @@ class WeightOnlyLinearMethod(QuantMethodBase):
 
             set_weight_attrs(
                 layer.weight_scale,
-                {
-                    "weight_loader": weight_loader,
-                    "output_dim": output_dim,
-                },
+                extra_weight_attrs,
             )
 
     def process_weights_after_loading(self, layer) -> None:
-        if not self.quant_config.is_checkpoint_bf16:
-            return
-        if isinstance(self, MacheteWeightOnlyLinearMethod):
-            from fastdeploy.model_executor.layers.quantization.ops import (
-                machete_quantize_and_pack,
-            )
+        def _process_quantize():
+            if isinstance(self, MacheteWeightOnlyLinearMethod):
+                # Using group scale for machete
+                quanted_weight_tensor, weight_scale_tensor = machete_quantize_and_pack(
+                    w=layer.weight,
+                    atype=layer._dtype,
+                    quant_type="uint4b8" if self.quant_config.name() == "wint4" else "uint8b128",
+                    group_size=self.quant_config.group_size,
+                )
+            else:
+                quanted_weight_tensor, weight_scale_tensor = weight_quantize(
+                    layer.weight,
+                    algo=self.quant_config.algo,
+                    arch=self.quant_config.weight_only_linear_arch,
+                )
 
-            # Using group scale for machete, group size is 128
-            quanted_weight_tensor, weight_scale_tensor = machete_quantize_and_pack(
-                w=layer.weight,
-                atype=layer._dtype,
-                quant_type="uint4b8" if self.quant_config.name() == "wint4" else "uint8b128",
-                group_size=128,
+                if current_platform.is_maca():
+                    quanted_weight_tensor = paddle.transpose(quanted_weight_tensor, [1, 0])
+
+            free_tensor(layer.weight)
+
+            layer.weight = layer.create_parameter(
+                shape=quanted_weight_tensor.shape,
+                dtype="int8" if not isinstance(self, MacheteWeightOnlyLinearMethod) else "int32",
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0),
             )
+            layer.weight_scale = layer.create_parameter(
+                shape=weight_scale_tensor.shape,
+                dtype=layer._dtype,
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0),
+            )
+            layer.weight.copy_(quanted_weight_tensor, False)
+            layer.weight_scale.copy_(weight_scale_tensor, False)
+
+        if self.quant_config.is_checkpoint_bf16:
+            if self.model_format == "torch":
+                process_weight_transpose(layer, "weight")
+            _process_quantize()
         else:
-            quanted_weight_tensor, weight_scale_tensor = weight_quantize(
-                layer.weight,
-                algo=self.quant_config.algo,
-                arch=self.quant_config.weight_only_linear_arch,
-            )
-
-        free_tensor(layer.weight)
-
-        layer.weight = layer.create_parameter(
-            shape=quanted_weight_tensor.shape,
-            dtype="int8" if not isinstance(self, MacheteWeightOnlyLinearMethod) else "int32",
-            is_bias=False,
-            default_initializer=paddle.nn.initializer.Constant(0),
-        )
-        layer.weight_scale = layer.create_parameter(
-            shape=weight_scale_tensor.shape,
-            dtype=layer._dtype,
-            is_bias=False,
-            default_initializer=paddle.nn.initializer.Constant(0),
-        )
-        layer.weight.copy_(quanted_weight_tensor, False)
-        layer.weight_scale.copy_(weight_scale_tensor, False)
+            return
 
     @abstractmethod
     def process_loaded_weights(self, layer, weights) -> None:
@@ -338,7 +361,7 @@ class WeightOnlyLinearMethod(QuantMethodBase):
         linear_out = weight_only_linear(
             x,
             weight=layer.weight,
-            bias=layer.bias if layer.add_bias else None,
+            bias=layer.bias if layer.with_bias else None,
             weight_scale=layer.weight_scale,
             weight_dtype=("int8" if self.quant_config.name() == "wint8" else "int4"),
             arch=self.quant_config.weight_only_linear_arch,
@@ -399,25 +422,21 @@ class MacheteWeightOnlyLinearMethod(WeightOnlyLinearMethod):
         super().__init__(quant_config)
 
     def process_prequanted_weights(self, layer, state_dict) -> None:
-        pass
+        raise NotImplementedError("Machete kernel doesn't support prequant. Please set FD_USE_MACHETE to 0.")
 
     def process_loaded_weights(self, layer, weight) -> None:
-        from fastdeploy.model_executor.layers.quantization.ops import (
-            machete_quantize_and_pack,
-        )
 
         # Using group scale for machete, group size is 128
         quanted_weight_tensor, weight_scale_tensor = machete_quantize_and_pack(
             w=weight,
             atype=layer._dtype,
             quant_type="uint4b8" if self.quant_config.name() == "wint4" else "uint8b128",
-            group_size=128,
+            group_size=self.quant_config.group_size,
         )
         layer.weight.set_value(quanted_weight_tensor)
         layer.weight_scale.set_value(weight_scale_tensor.astype(paddle.get_default_dtype()))
 
     def apply(self, layer, x):
-        from fastdeploy.model_executor.layers.quantization.ops import machete_wint_mm
 
         # Using group scale for machete, group size is 128
         linear_out = machete_wint_mm(
@@ -425,7 +444,7 @@ class MacheteWeightOnlyLinearMethod(WeightOnlyLinearMethod):
             w_prepack=layer.weight,
             w_g_s=layer.weight_scale,
             weight_dtype="uint4b8" if self.quant_config.name() == "wint4" else "uint8b128",
-            group_size=128,
+            group_size=self.quant_config.group_size,
         )
         if layer.with_bias:
             linear_out = paddle.add(linear_out, layer.bias)

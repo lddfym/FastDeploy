@@ -83,6 +83,7 @@ class MLAAttentionMetadata(AttentionMetadata):
 
     max_enc_len_this_time: Optional[paddle.Tensor] = None
     max_dec_len_this_time: Optional[paddle.Tensor] = None
+    max_kv_len_this_time: Optional[paddle.Tensor] = None
 
 
 class MLAAttentionBackend(AttentionBackend):
@@ -111,7 +112,7 @@ class MLAAttentionBackend(AttentionBackend):
 
         # 基础配置
         self.block_size: int = fd_config.cache_config.block_size
-        self.max_seq_len: int = fd_config.parallel_config.max_model_len
+        self.max_seq_len: int = fd_config.model_config.max_model_len
         self.rope_theta: float = (
             10000.0 if fd_config.model_config.rope_theta is None else fd_config.model_config.rope_theta
         )
@@ -199,22 +200,20 @@ class MLAAttentionBackend(AttentionBackend):
             forward_meta.kv_batch_ids,
             forward_meta.kv_tile_ids_per_batch,
             forward_meta.kv_num_blocks_x_cpu,
-            forward_meta.max_len_kv_cpu,
             self.encoder_block_shape_q,
             self.decoder_block_shape_q,
             self.group_size,
             self.block_size,
-            self.speculate_max_draft_token_num + 1,
         )
-
         # MLA
         metadata.max_enc_len_this_time = forward_meta.max_len_tensor_cpu[1]
         metadata.max_dec_len_this_time = forward_meta.max_len_tensor_cpu[2]
+        metadata.max_kv_len_this_time = forward_meta.max_len_tensor_cpu[5]
 
         # pd_disaggregation
         metadata.kv_signal_data_list = [None] * self.num_layers
         if self.pd_disaggregation_mode == "per_chunk":
-            if not self.keep_pd_step_flag:
+            if not self.keep_pd_step_flag and not forward_meta.is_dummy_or_profile_run:
                 init_kv_signal_per_query(
                     forward_meta.seq_lens_encoder,
                     forward_meta.seq_lens_this_time,
@@ -241,12 +240,9 @@ class MLAAttentionBackend(AttentionBackend):
         """
         Calculate kv cache shape for MLA
         """
-        return (
-            max_num_blocks,
-            1,
-            self.block_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-        )
+        key_cache_shape = [max_num_blocks, 1, self.block_size, self.kv_lora_rank + self.qk_rope_head_dim]
+        value_cache_shape = []
+        return key_cache_shape, value_cache_shape
 
     def forward_extend(
         self,
@@ -282,6 +278,7 @@ class MLAAttentionBackend(AttentionBackend):
             forward_meta.batch_id_per_token,
             forward_meta.cu_seqlens_q,
             metadata.block_tables,
+            metadata.kv_signal_data_list[layer.layer_id],
             "none",
             getattr(forward_meta, "max_input_length", -1),
         )
@@ -362,7 +359,7 @@ class MLAAttentionBackend(AttentionBackend):
             forward_meta.decoder_num_blocks_device,
             forward_meta.decoder_chunk_size_device,
             metadata.max_dec_len_this_time,
-            forward_meta.max_len_kv_cpu,
+            metadata.max_kv_len_this_time,
             None,  # attn_mask
             None,  # qkv_bias
             None,  # qkv_out_scales
@@ -425,10 +422,10 @@ class MLAAttentionBackend(AttentionBackend):
                 forward_meta.batch_id_per_token,
                 forward_meta.cu_seqlens_q,
                 metadata.block_tables,
+                metadata.kv_signal_data_list[layer.layer_id],
                 "none",
                 self.max_seq_len,
             )
-
             # FA
             fmha_out = self.flash_attn_func(
                 q,
@@ -478,7 +475,7 @@ class MLAAttentionBackend(AttentionBackend):
                 forward_meta.decoder_num_blocks_device,
                 forward_meta.decoder_chunk_size_device,
                 metadata.max_dec_len_this_time,
-                forward_meta.max_len_kv_cpu,
+                metadata.max_kv_len_this_time,
                 None,  # attn_mask
                 None,  # qkv_bias
                 None,  # qkv_out_scales

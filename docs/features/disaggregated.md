@@ -1,3 +1,5 @@
+[简体中文](../zh/features/disaggregated.md)
+
 # Disaggregated Deployment
 
 Large model inference consists of two phases: Prefill and Decode, which are compute-intensive and memory access-intensive respectively. Deploying Prefill and Decode separately in certain scenarios can improve hardware utilization, effectively increase throughput, and reduce overall sentence latency.
@@ -27,56 +29,14 @@ In multi-instance scenarios, each incoming request needs to be assigned to diffe
 
 ## Usage Instructions
 
-### Single-machine Disaggregated Deployment
-
-#### Online Inference Service
-Use the following commands for service deployment:
-
-**Prefill Instance**
-
-```bash
-export FD_LOG_DIR="log_prefill"
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-python -m fastdeploy.entrypoints.openai.api_server \
-       --model ERNIE-4.5-300B-A47B-BF16 \
-       --port 8180 --metrics-port 8181 \
-       --engine-worker-queue-port 8182 \
-       --cache-queue-port 8183 \
-       --tensor-parallel-size 4 \
-       --quantization wint4 \
-       --splitwise-role "prefill"
-```
-
-**Decode Instance**
-
-```bash
-export FD_LOG_DIR="log_decode"
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-# Note: innode-prefill-ports should specify the engine-worker-queue-port of the Prefill service
-python -m fastdeploy.entrypoints.openai.api_server \
-       --model ERNIE-4.5-300B-A47B-BF16 \
-       --port 8184 --metrics-port 8185 \
-       --engine-worker-queue-port 8186 \
-       --cache-queue-port 8187 \
-       --tensor-parallel-size 4 \
-       --quantization wint4 \
-       --innode-prefill-ports 8182 \
-       --splitwise-role "decode"
-```
-
-Note: When requesting single-machine PD disaggregated service, **users should request the Decode service's port**.
-
-#### Offline Inference Service
-Refer to the example code `offline_disaggregated_demo.py` in the `fastdeploy/demo` directory for offline inference service deployment.
-
 ### Multi-machine Disaggregated Deployment
 
 #### Prerequisite: Redis
 
-> **⚠️ NOTE**  
-> **Redis requirement: version 6.2.0 or higher**  
+> **⚠️ NOTE**
+> **Redis requirement: version 6.2.0 or higher**
 > Versions below this may not support the required commands.
-> 
+>
 * Installation via `conda`
 
 ```bash
@@ -116,12 +76,14 @@ For multi-machine deployment, confirm that the NIC supports RDMA and that all no
 ```bash
 export FD_LOG_DIR="log_prefill"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export ENABLE_V1_KVCACHE_SCHEDULER=0
 echo "set RDMA NICS"
 export $(bash scripts/get_rdma_nics.sh gpu)
 echo "KVCACHE_RDMA_NICS ${KVCACHE_RDMA_NICS}"
 python -m fastdeploy.entrypoints.openai.api_server \
        --model ERNIE-4.5-300B-A47B-BF16 \
-       --port 8180 --metrics-port 8181 \
+       --port 8180 \
+       --metrics-port 8181 \
        --engine-worker-queue-port 8182 \
        --cache-queue-port 8183 \
        --tensor-parallel-size 4 \
@@ -141,12 +103,14 @@ python -m fastdeploy.entrypoints.openai.api_server \
 ```bash
 export FD_LOG_DIR="log_decode"
 export CUDA_VISIBLE_DEVICES=4,5,6,7
+export ENABLE_V1_KVCACHE_SCHEDULER=0
 echo "set RDMA NICS"
 export $(bash scripts/get_rdma_nics.sh gpu)
 echo "KVCACHE_RDMA_NICS ${KVCACHE_RDMA_NICS}"
 python -m fastdeploy.entrypoints.openai.api_server \
        --model ERNIE-4.5-300B-A47B-BF16 \
-       --port 8184 --metrics-port 8185 \
+       --port 8184 \
+       --metrics-port 8185 \
        --engine-worker-queue-port 8186 \
        --cache-queue-port 8187 \
        --tensor-parallel-size 4 \
